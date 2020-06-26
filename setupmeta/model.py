@@ -10,7 +10,7 @@ import sys
 
 import setuptools
 
-from setupmeta import get_words, listify, MetaDefs, PKGID, project_path, readlines, relative_path, Requirements, short, trace, warn
+from setupmeta import get_words, listify, MetaDefs, PKGID, project_path, readlines, relative_path, Requirements, requirements_from_file, short, trace, warn
 from setupmeta.content import find_contents, load_contents, load_list, load_readme, resolved_paths
 from setupmeta.license import determined_license
 from setupmeta.versioning import project_scm, Versioning
@@ -414,11 +414,24 @@ class PackageInfo:
 class SetupMeta(Settings):
     """ Find usable definitions throughout a project SetupPy SetupMeta """
 
-    def __init__(self, upstream):
-        """
-        :param upstream: Either a dict or Distribution
-        """
-        Settings.__init__(self)
+    def preprocess(self, upstream):
+        for require_field in ('install_requires', 'tests_require'):
+            value = getattr(upstream, require_field)
+            if isinstance(value, str) and value.startswith('@'):
+                self.add_definition(require_field, value, EXPLICIT)
+                self.add_definition(require_field, requirements_from_file(value[1:]), value[1:], override=True)
+
+        if isinstance(upstream.extras_require, dict):
+            if any([isinstance(deps, str) and deps.startswith('@') for deps in upstream.extras_require.values()]):
+                self.add_definition('extras_require', upstream.extras_require, EXPLICIT)
+                self.add_definition('extras_require', {
+                    extra: (requirements_from_file(deps[1:]) or []) if isinstance(deps, str) and deps.startswith('@') else deps
+                    for extra, deps in upstream.extras_require.items()
+                }, 'preprocessed', override=True)
+
+        return self
+
+    def finalize(self, upstream):
         self.attrs = MetaDefs.dist_to_dict(upstream)
 
         self.find_project_dir(self.attrs.pop("_setup_py_path", None))
@@ -426,7 +439,8 @@ class SetupMeta(Settings):
 
         # Add definitions from setup()'s attrs (highest priority)
         for key, value in self.attrs.items():
-            self.add_definition(key, value, EXPLICIT)
+            if key not in self.definitions:
+                self.add_definition(key, value, EXPLICIT)
 
         # Add definitions from PKG-INFO, when available
         self.pkg_info = PackageInfo(MetaDefs.project_dir)
@@ -442,7 +456,7 @@ class SetupMeta(Settings):
 
         if "--name" in sys.argv[1:3]:
             # No need to waste time auto-filling anything if all we need to show is package name
-            return
+            return self
 
         packages = self.attrs.get("packages", [])
         py_modules = self.attrs.get("py_modules", [])
@@ -520,6 +534,8 @@ class SetupMeta(Settings):
         self.auto_fill_long_description()
         self.auto_fill_include_package_data()
         self.sort_classifiers()
+
+        return self
 
     def resolved_url(self, url, base=None):
         """

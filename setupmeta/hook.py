@@ -2,27 +2,37 @@
 Hook for setuptools/distutils
 """
 
-import distutils.dist
+import setuptools.dist
 
 from setupmeta.model import MetaDefs, SetupMeta
 
 
-# Reference to original distutils.dist.Distribution.parse_command_line
-dd_original = distutils.dist.Distribution.parse_command_line
-
-
-def distutils_hook(dist, *args, **kwargs):
-    """ distutils.dist.Distribution.parse_command_line replacement
-
-    distutils calls this right after having processed 'setup_requires'
-    It really calls self.parse_command_line(command), we jump in
-    so we can decorate the 'dist' object appropriately for our own commands
+finalize_options_orig = setuptools.dist.Distribution.finalize_options
+def finalize_options(dist):
     """
-    if dist.script_args and not hasattr(dist, "_setupmeta"):
-        # Add our ._setupmeta object (distutils calls this several times, we need only one)
-        dist._setupmeta = SetupMeta(dist)
-        MetaDefs.fill_dist(dist, dist._setupmeta.to_dict())
-    return dd_original(dist, *args, **kwargs)
+    Hook into setuptools' Distribution class before attributes are interpreted.
+
+    This is called before Distribution attributes are finalized and validated,
+    allowing us to transform attribute values before they have to conform to
+    the usual spec. This step is *before* configuration is additionally read
+    from config files.
+    """
+    dist._setupmeta = SetupMeta()
+    MetaDefs.fill_dist(dist, dist._setupmeta.preprocess(dist).to_dict())
+    finalize_options_orig(dist)
+
+
+parse_config_files_orig = setuptools.dist.Distribution.parse_config_files
+def parse_config_files(dist, filenames=None, ignore_option_errors=False):
+    """
+    Hook into setuptools' Distribution class during final configuration phases.
+
+    This allows us to insert setupmeta's imputed values for various attributes
+    after all configuration has interpreted and read from config files.
+    """
+    parse_config_files_orig(dist, filenames=filenames, ignore_option_errors=ignore_option_errors)
+    if hasattr(dist, '_setupmeta'):  # This will not be true during installation of setup requirements.
+        MetaDefs.fill_dist(dist, dist._setupmeta.finalize(dist).to_dict())
 
 
 def register(dist, name, value):
@@ -35,8 +45,10 @@ def register(dist, name, value):
     if name == "setup_requires":
         value = value if isinstance(value, list) else [value]
         if any(item.startswith('setupmeta') for item in value):
-            # Replace Distribution.parse_command_line so we can inject our parsing
-            distutils.dist.Distribution.parse_command_line = distutils_hook
-
+            # Replace Distribution finalization hooks so we can inject our parsed options
+            setuptools.dist.Distribution.finalize_options = finalize_options
+            setuptools.dist.Distribution.parse_config_files = parse_config_files
         else:
-            distutils.dist.Distribution.parse_command_line = dd_original
+            # Replace Distribution hooks with original implementations (just in case rerunning in same process)
+            setuptools.dist.Distribution.finalize_options = finalize_options_orig
+            setuptools.dist.Distribution.parse_config_files = parse_config_files_orig
